@@ -145,13 +145,13 @@ DECLARE
     product JSONB;
 BEGIN
     -- Get the maximum OrderID and increment by 1 for the new order
-    SELECT MAX(OrderID) + 1
+    SELECT MAX(OrderID)
     INTO new_order_id
     FROM Orders;
 
     -- Insert the new order into Orders table first to get the new OrderID
     INSERT INTO Orders (OrderID, CustomerID, Tot_Amt)
-    VALUES (new_order_id, p_customer_id, 0); -- Tot_Amt will be calculated later
+    VALUES (new_order_id + 1, p_customer_id, 0); -- Tot_Amt will be calculated later
 
     -- Loop through each product in the JSON array
     FOR product IN
@@ -181,13 +181,13 @@ BEGIN
         WHERE productid = var_prod_id;
 
         
-        SELECT MAX(OrderDetail_ID), 0 + 1  -- Get the maximum OrderDetail_ID and increment by 1 for the new order detail
+        SELECT MAX(OrderDetail_ID)  -- Get the maximum OrderDetail_ID and increment by 1 for the new order detail
         INTO new_order_detail_id			-- Store it in new_order_detail_id
         FROM OrderDetails;
 
         -- Insert into the OrderDetails table for each product
         INSERT INTO OrderDetails (OrderDetail_ID, OrderID, ProductID, Qty, Tot_Amt)
-        VALUES (new_order_detail_id, new_order_id, var_prod_id, var_qty, (var_qty * var_prod_price));
+        VALUES (new_order_detail_id + 1, new_order_id + 1, var_prod_id, var_qty, (var_qty * var_prod_price));
 
        
         UPDATE Products                
@@ -201,9 +201,9 @@ BEGIN
     -- Update the total amount for the order in Orders table
     UPDATE Orders
     SET Tot_Amt = total_amount
-    WHERE OrderID = new_order_id;
+    WHERE OrderID = new_order_id + 1;
 
-    RETURN new_order_id;
+    RETURN new_order_id + 1;
 
 END;
 $$;
@@ -242,6 +242,85 @@ END;
 $$;
 
 SELECT f2_name(1);  
+
+
+-- TASK 3 : Transactions and Concurrency Control
+
+-- Part 1 : Write a transaction to ensure an order is placed only if all products are in stock. If any product is out of stock, rollback the transaction.
+
+CREATE OR REPLACE PROCEDURE process_order_and_place_order(
+    p_customer_id INT,
+    p_product_details JSONB  
+) 
+LANGUAGE plpgsql 
+AS $$ 
+DECLARE 
+    product JSONB;
+    available_qty INT;
+    ordered_qty INT;
+    product_id INT;
+    new_order_id INT;
+    success BOOLEAN := TRUE;
+BEGIN
+    BEGIN
+        -- Checking stock availability
+        FOR product IN 
+            SELECT * FROM jsonb_array_elements(p_product_details) AS products
+        LOOP
+            product_id := (product->>'product_id')::INT;                -- Storing each product id in product_id
+            ordered_qty := (product->>'qty')::INT;                      -- Storing each product quantity id in ordered_qty
+
+            -- Fetch available stock 
+            SELECT Qty INTO available_qty FROM Products WHERE ProductID = product_id;        
+
+            
+            IF ordered_qty > available_qty THEN           -- If stock is insufficient, raise an exception
+                success := FALSE;						   -- Mark success as FALSE
+                RAISE EXCEPTION 'Order cannot be placed. Product ID: % is out of stock (Requested: %, Available: %)', 
+                    product_id, ordered_qty, available_qty;
+            END IF;
+        END LOOP;
+
+        -- Place the order & update stock by calling my already created function f1_name
+        SELECT f1_name(p_customer_id, p_product_details) INTO new_order_id;
+
+    EXCEPTION 
+        WHEN OTHERS THEN
+            -- If any error occurs, set success flag to FALSE and log the error
+            success := FALSE;
+            RAISE NOTICE 'Transaction failed: %', SQLERRM;
+    END;
+
+    
+    IF success THEN           -- If success == TRUE then commit 
+        COMMIT;
+        RAISE NOTICE 'Transaction committed successfully.';
+    ELSE 					  -- Else Rollback
+        ROLLBACK;
+        RAISE NOTICE 'Transaction rolled back due to errors.';
+    END IF;
+
+END $$;
+
+
+-- Valid 
+CALL process_order_and_place_order(
+    4,  
+    '[{"product_id": 101, "qty": 2}, {"product_id": 102, "qty": 1}]'::jsonb
+);
+
+-- Rollback
+CALL process_order_and_place_order(
+    1,  
+    '[{"product_id": 101, "qty": 1000}]'::jsonb  -- Exceeds stock
+);
+
+
+SELECT * FROM Orders;
+SELECT * FROM OrderDetails;
+
+
+
 
 
 -- TASK 4 : SQL for Reporting and Analytics
